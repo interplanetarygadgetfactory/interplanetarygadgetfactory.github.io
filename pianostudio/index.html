@@ -26,14 +26,15 @@ input:focus, textarea:focus, select:focus, button:focus-visible { outline: 2px s
    ▼▼▼  STEP 1 of setup: paste your two Supabase values here  ▼▼▼
    (Both come from Supabase → Project Settings → API)
    ═════════════════════════════════════════════════════════════ */
-const SUPABASE_URL = "https://vxvemhedqnnbkmlwnigx.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_8kWuqsDvGTu4iBn3iWRy4g_wcoonDn0";
+const SUPABASE_URL = "PASTE_YOUR_SUPABASE_URL_HERE";
+const SUPABASE_ANON_KEY = "PASTE_YOUR_SUPABASE_ANON_KEY_HERE";
 /* ═════════════════════════════════════════════════════════════ */
 
 const { useState, useEffect, useCallback, useRef } = React;
 
 const CONFIGURED = !SUPABASE_URL.includes("PASTE") && !SUPABASE_ANON_KEY.includes("PASTE");
 const sb = CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const SITE_URL = window.location.origin + window.location.pathname;
 
 const C = {
   ivory: "#FAF7F1", paper: "#FFFFFF", ebony: "#211E1A", inkSoft: "#5C564D",
@@ -41,44 +42,18 @@ const C = {
   brassSoft: "#F3ECDD", green: "#3E6B4F", greenSoft: "#E3EDE6",
 };
 
-const KEYS = {
-  settings: "studio:settings",
-  students: "studio:students",
-  bookings: "studio:bookings",
-  messages: "studio:messages",
-};
-
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const DEFAULT_SETTINGS = {
-  pin: null,
-  lessonMinutes: 60,
-  availability: {
-    1: ["15:00", "16:00", "17:00", "18:00"],
-    2: ["15:00", "16:00", "17:00", "18:00"],
-    3: ["15:00", "16:00", "17:00", "18:00"],
-    4: ["15:00", "16:00", "17:00", "18:00"],
-    5: ["15:00", "16:00", "17:00", "18:00"],
-    6: ["09:00", "10:00", "11:00"],
-    0: [],
-  },
+const DEFAULT_AVAIL = {
+  1: ["15:00", "16:00", "17:00", "18:00"],
+  2: ["15:00", "16:00", "17:00", "18:00"],
+  3: ["15:00", "16:00", "17:00", "18:00"],
+  4: ["15:00", "16:00", "17:00", "18:00"],
+  5: ["15:00", "16:00", "17:00", "18:00"],
+  6: ["09:00", "10:00", "11:00"],
+  0: [],
 };
 const ALL_SLOT_TIMES = [];
 for (let h = 7; h <= 20; h++) ALL_SLOT_TIMES.push(`${String(h).padStart(2, "0")}:00`);
-
-/* ── Supabase storage helpers (key/value table "studio") ── */
-async function load(key, fallback) {
-  try {
-    const { data, error } = await sb.from("studio").select("value").eq("key", key).maybeSingle();
-    if (error || !data) return fallback;
-    return data.value;
-  } catch { return fallback; }
-}
-async function save(key, value) {
-  try {
-    const { error } = await sb.from("studio").upsert({ key, value });
-    return !error;
-  } catch { return false; }
-}
 
 /* ── date helpers ── */
 const fmtDateKey = (d) =>
@@ -110,7 +85,9 @@ const Tag = ({ children, tone = "neutral" }) => {
   const tones = {
     pending: { bg: C.brassSoft, fg: C.brass },
     confirmed: { bg: C.greenSoft, fg: C.green },
+    approved: { bg: C.greenSoft, fg: C.green },
     declined: { bg: C.feltSoft, fg: C.felt },
+    removed: { bg: C.feltSoft, fg: C.felt },
     cancelled: { bg: "#EFECE5", fg: C.inkSoft },
     neutral: { bg: "#EFECE5", fg: C.inkSoft },
   };
@@ -144,265 +121,335 @@ const inputStyle = {
   width: "100%", boxSizing: "border-box", padding: "10px 12px", fontSize: 15,
   border: `1px solid ${C.line}`, borderRadius: 8, background: C.ivory, color: C.ebony,
 };
+const errStyle = { color: C.felt, fontSize: 13, margin: "8px 0 0" };
+const okStyle = { color: C.green, fontSize: 13, margin: "8px 0 0" };
 
-/* ── shown until Supabase keys are pasted in ── */
 function NotConfigured() {
   return (
     <Card style={{ maxWidth: 560, margin: "40px auto" }}>
       <h2 style={h2Style}>Almost there — connect your database</h2>
       <p style={pMuted}>
-        This app needs your Supabase project URL and anon key. Open{" "}
-        <code>index.html</code> in any text editor, find the two lines near the
-        top marked <strong>STEP 1</strong>, and paste in your values. The
-        setup guide that came with this file walks through it click by click.
+        Open <code>index.html</code> in a text editor, find the two lines near the top
+        marked <strong>STEP 1</strong>, and paste in your Supabase URL and anon key.
+        See the setup guide for details.
       </p>
     </Card>
   );
 }
 
-/* ═══════════ root app ═══════════ */
-function PianoStudio() {
-  const [phase, setPhase] = useState("loading");
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [students, setStudents] = useState([]);
-  const [bookings, setBookings] = useState([]);
-  const [messages, setMessages] = useState([]);
-  const [me, setMe] = useState(null);
+/* ═════════════════════════════════════════════════════════════
+   Root: handles auth session → routes to the right screen
+   ═════════════════════════════════════════════════════════════ */
+function App() {
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [recovery, setRecovery] = useState(false);
   const [toast, setToast] = useState(null);
-
-  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2600); };
-
-  const refresh = useCallback(async () => {
-    const [s, st, b, m] = await Promise.all([
-      load(KEYS.settings, null),
-      load(KEYS.students, []),
-      load(KEYS.bookings, []),
-      load(KEYS.messages, []),
-    ]);
-    if (s) setSettings(s);
-    setStudents(st); setBookings(b); setMessages(m);
-    return s;
-  }, []);
+  const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3200); };
 
   useEffect(() => {
     if (!CONFIGURED) return;
-    (async () => { await refresh(); setPhase("choose"); })();
-  }, [refresh]);
+    sb.auth.getSession().then(({ data }) => {
+      setSession(data.session); setAuthReady(true);
+    });
+    const { data: sub } = sb.auth.onAuthStateChange((event, sess) => {
+      setSession(sess);
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
+      if (event === "SIGNED_OUT") { setProfile(null); setRecovery(false); }
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
-  useEffect(() => {
-    if (phase !== "teacher" && phase !== "student") return;
-    const id = setInterval(refresh, 8000);
-    return () => clearInterval(id);
-  }, [phase, refresh]);
+  const loadProfile = useCallback(async () => {
+    if (!session) { setProfile(null); return; }
+    const { data } = await sb.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+    setProfile(data || null);
+  }, [session]);
 
-  const persistSettings = async (next) => { setSettings(next); await save(KEYS.settings, next); };
-  const persistStudents = async (next) => { setStudents(next); await save(KEYS.students, next); };
-  const persistBookings = async (next) => { setBookings(next); await save(KEYS.bookings, next); };
-  const persistMessages = async (next) => { setMessages(next); await save(KEYS.messages, next); };
+  useEffect(() => { loadProfile(); }, [loadProfile]);
 
-  const requestBooking = async (dateKey, time) => {
-    const fresh = await load(KEYS.bookings, []);
-    const clash = fresh.find(
-      (b) => b.date === dateKey && b.time === time && ["pending", "confirmed"].includes(b.status)
-    );
-    if (clash) { flash("That time was just taken — pick another."); setBookings(fresh); return; }
-    const next = [...fresh, {
-      id: `bk_${Date.now()}`, studentId: me.id, studentName: me.name,
-      date: dateKey, time, status: "pending", note: "", createdAt: Date.now(),
-    }];
-    await persistBookings(next);
-    flash("Request sent — your teacher will confirm it.");
-  };
+  const signOut = async () => { await sb.auth.signOut(); };
 
-  const setBookingStatus = async (id, status) => {
-    await persistBookings(bookings.map((b) => (b.id === id ? { ...b, status } : b)));
-  };
-  const setLessonNote = async (id, note) => {
-    await persistBookings(bookings.map((b) => (b.id === id ? { ...b, note } : b)));
-  };
-  const sendMessage = async (studentId, fromRole, fromName, text) => {
-    if (!text.trim()) return;
-    const fresh = await load(KEYS.messages, []);
-    await persistMessages([...fresh, {
-      id: `msg_${Date.now()}`, studentId, fromRole, fromName, text: text.trim(), ts: Date.now(),
-    }]);
-  };
+  if (!CONFIGURED)
+    return <Shell><NotConfigured /></Shell>;
+  if (!authReady)
+    return <Shell><p style={{ color: C.inkSoft, padding: 24 }}>Opening the studio…</p></Shell>;
 
-  if (!CONFIGURED) {
+  if (recovery && session)
     return (
-      <div style={{ minHeight: "100vh", background: C.ivory, color: C.ebony, fontFamily: "'Inter', sans-serif" }}>
-        <Header me={null} onSwitch={() => {}} />
-        <NotConfigured />
-      </div>
+      <Shell toast={toast}>
+        <SetNewPassword flash={flash} onDone={() => setRecovery(false)} />
+      </Shell>
     );
-  }
+
+  if (!session)
+    return <Shell toast={toast}><AuthScreen flash={flash} /></Shell>;
+
+  if (!profile)
+    return <Shell toast={toast}><p style={{ color: C.inkSoft, padding: 24 }}>Loading your profile…</p></Shell>;
+
+  if (profile.status === "removed")
+    return (
+      <Shell toast={toast} who={profile} onSignOut={signOut}>
+        <Card style={{ maxWidth: 520, marginTop: 24 }}>
+          <h2 style={h2Style}>Account inactive</h2>
+          <p style={pMuted}>
+            Your studio access has been deactivated by the teacher. If you think this
+            is a mistake, please contact your teacher directly.
+          </p>
+          <Btn onClick={signOut}>Sign out</Btn>
+        </Card>
+      </Shell>
+    );
+
+  if (profile.role !== "teacher" && profile.status === "pending")
+    return (
+      <Shell toast={toast} who={profile} onSignOut={signOut}>
+        <Card style={{ maxWidth: 520, marginTop: 24 }}>
+          <h2 style={h2Style}>Almost in! 🎵</h2>
+          <p style={pMuted}>
+            Your email is confirmed and your account is created. Your teacher just
+            needs to approve you before you can book lessons — check back soon.
+          </p>
+          <Btn kind="ghost" onClick={signOut}>Sign out</Btn>
+        </Card>
+      </Shell>
+    );
+
+  if (profile.role === "teacher")
+    return (
+      <Shell toast={toast} who={profile} onSignOut={signOut}>
+        <TeacherHome me={profile} flash={flash} />
+      </Shell>
+    );
 
   return (
+    <Shell toast={toast} who={profile} onSignOut={signOut}>
+      <StudentHome me={profile} flash={flash} onSignOut={signOut} />
+    </Shell>
+  );
+}
+
+function Shell({ children, toast, who, onSignOut }) {
+  return (
     <div style={{ minHeight: "100vh", background: C.ivory, color: C.ebony, fontFamily: "'Inter', sans-serif" }}>
-      <Header me={me} onSwitch={() => { setMe(null); setPhase("choose"); }} />
-      <main style={{ maxWidth: 880, margin: "0 auto", padding: "0 16px 64px" }}>
-        {phase === "loading" && <p style={{ color: C.inkSoft, padding: 24 }}>Opening the studio…</p>}
-
-        {phase === "choose" && (
-          <ChooseRole
-            hasPin={!!settings.pin}
-            onTeacher={() => setPhase(settings.pin ? "teacherPin" : "teacherSetup")}
-            onStudent={() => setPhase("studentPick")}
-          />
+      <header style={{
+        maxWidth: 880, margin: "0 auto", padding: "28px 16px 8px",
+        display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12,
+      }}>
+        <div>
+          <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 700, fontSize: 28, margin: 0, letterSpacing: "-0.01em" }}>
+            The Piano Studio
+          </h1>
+          <p style={{ margin: "2px 0 0", color: C.inkSoft, fontSize: 13 }}>
+            Lessons, bookings & notes — all in one place
+          </p>
+        </div>
+        {who && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 13, color: C.inkSoft }}>
+              {who.role === "teacher" ? "Teacher" : who.name || who.email}
+            </span>
+            <Btn kind="ghost" style={{ padding: "6px 12px" }} onClick={onSignOut}>Sign out</Btn>
+          </div>
         )}
-
-        {phase === "teacherSetup" && (
-          <TeacherSetup onDone={async (pin) => {
-            await persistSettings({ ...settings, pin });
-            setMe({ role: "teacher" }); setPhase("teacher");
-          }} />
-        )}
-
-        {phase === "teacherPin" && (
-          <TeacherPin pin={settings.pin}
-            onOk={() => { setMe({ role: "teacher" }); setPhase("teacher"); }}
-            onBack={() => setPhase("choose")} />
-        )}
-
-        {phase === "studentPick" && (
-          <StudentPick students={students}
-            onPick={(s) => { setMe({ role: "student", ...s }); setPhase("student"); }}
-            onCreate={async (name) => {
-              const fresh = await load(KEYS.students, []);
-              const s = { id: `st_${Date.now()}`, name: name.trim() };
-              await persistStudents([...fresh, s]);
-              setMe({ role: "student", ...s }); setPhase("student");
-            }}
-            onBack={() => setPhase("choose")} />
-        )}
-
-        {phase === "teacher" && me?.role === "teacher" && (
-          <TeacherHome settings={settings} students={students} bookings={bookings} messages={messages}
-            onSettings={persistSettings} onStatus={setBookingStatus} onNote={setLessonNote}
-            onSend={(sid, text) => sendMessage(sid, "teacher", "Teacher", text)} flash={flash} />
-        )}
-
-        {phase === "student" && me?.role === "student" && (
-          <StudentHome me={me} settings={settings} bookings={bookings} messages={messages}
-            onRequest={requestBooking} onCancel={(id) => setBookingStatus(id, "cancelled")}
-            onSend={(text) => sendMessage(me.id, "student", me.name, text)} />
-        )}
-      </main>
-
+      </header>
+      <main style={{ maxWidth: 880, margin: "0 auto", padding: "0 16px 64px" }}>{children}</main>
       {toast && (
         <div style={{
           position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)",
           background: C.ebony, color: C.ivory, padding: "10px 18px", borderRadius: 8,
-          fontSize: 14, boxShadow: "0 6px 24px rgba(0,0,0,.18)", zIndex: 50,
+          fontSize: 14, boxShadow: "0 6px 24px rgba(0,0,0,.18)", zIndex: 50, maxWidth: "88%",
         }}>{toast}</div>
       )}
     </div>
   );
 }
 
-function Header({ me, onSwitch }) {
-  return (
-    <header style={{
-      maxWidth: 880, margin: "0 auto", padding: "28px 16px 8px",
-      display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12,
-    }}>
-      <div>
-        <h1 style={{ fontFamily: "'Fraunces', Georgia, serif", fontWeight: 700, fontSize: 28, margin: 0, letterSpacing: "-0.01em" }}>
-          The Piano Studio
-        </h1>
-        <p style={{ margin: "2px 0 0", color: C.inkSoft, fontSize: 13 }}>
-          Lessons, bookings & notes — all in one place
-        </p>
-      </div>
-      {me && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ fontSize: 13, color: C.inkSoft }}>{me.role === "teacher" ? "Teacher" : me.name}</span>
-          <Btn kind="ghost" style={{ padding: "6px 12px" }} onClick={onSwitch}>Switch user</Btn>
-        </div>
-      )}
-    </header>
-  );
-}
+/* ═════════════════════════════════════════════════════════════
+   Auth screens
+   ═════════════════════════════════════════════════════════════ */
+function AuthScreen({ flash }) {
+  const [mode, setMode] = useState("login"); // login | signup | forgot
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [ok, setOk] = useState("");
 
-function ChooseRole({ hasPin, onTeacher, onStudent }) {
+  const reset = () => { setErr(""); setOk(""); };
+
+  const login = async () => {
+    reset(); setBusy(true);
+    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+    setBusy(false);
+    if (error) {
+      if (/confirm/i.test(error.message)) setErr("Please confirm your email first — check your inbox (and spam) for the confirmation link.");
+      else setErr("Login failed: " + error.message);
+    }
+  };
+
+  const signup = async () => {
+    reset();
+    if (!name.trim()) { setErr("Please enter your name."); return; }
+    if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    setBusy(true);
+    const { error } = await sb.auth.signUp({
+      email: email.trim(), password: pw,
+      options: { emailRedirectTo: SITE_URL, data: { name: name.trim() } },
+    });
+    setBusy(false);
+    if (error) { setErr("Sign-up failed: " + error.message); return; }
+    setOk("Almost done! We've emailed you a confirmation link. Click it, then come back here and log in.");
+  };
+
+  const forgot = async () => {
+    reset(); setBusy(true);
+    const { error } = await sb.auth.resetPasswordForEmail(email.trim(), { redirectTo: SITE_URL });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setOk("If that email has an account, a password-reset link is on its way. Open it on this same device.");
+  };
+
   return (
     <div style={{ paddingTop: 8 }}>
       <Staff />
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
-        <Card>
-          <h2 style={h2Style}>I'm the teacher</h2>
-          <p style={pMuted}>Set your weekly availability, confirm lesson requests, keep notes, and message students.</p>
-          <Btn onClick={onTeacher}>{hasPin ? "Enter teacher PIN" : "Set up my studio"}</Btn>
-        </Card>
-        <Card>
-          <h2 style={h2Style}>I'm a student</h2>
-          <p style={pMuted}>Book a lesson time, see your upcoming lessons, and message your teacher about scheduling.</p>
-          <Btn kind="accent" onClick={onStudent}>Continue as student</Btn>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function TeacherSetup({ onDone }) {
-  const [pin, setPin] = useState("");
-  return (
-    <Card style={{ maxWidth: 420, marginTop: 16 }}>
-      <h2 style={h2Style}>Welcome, teacher</h2>
-      <p style={pMuted}>
-        Choose a 4-digit PIN so only you can manage the schedule. (This is a light lock,
-        not real security — don't reuse a bank PIN.)
-      </p>
-      <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-        placeholder="e.g. 4321" inputMode="numeric" style={inputStyle} />
-      <div style={{ marginTop: 12 }}>
-        <Btn disabled={pin.length !== 4} onClick={() => onDone(pin)}>Save PIN & open studio</Btn>
-      </div>
-    </Card>
-  );
-}
-
-function TeacherPin({ pin, onOk, onBack }) {
-  const [val, setVal] = useState("");
-  const [err, setErr] = useState(false);
-  return (
-    <Card style={{ maxWidth: 420, marginTop: 16 }}>
-      <h2 style={h2Style}>Teacher PIN</h2>
-      <input value={val}
-        onChange={(e) => { setErr(false); setVal(e.target.value.replace(/\D/g, "").slice(0, 4)); }}
-        placeholder="Enter your 4-digit PIN" inputMode="numeric" style={inputStyle} />
-      {err && <p style={{ color: C.felt, fontSize: 13, margin: "8px 0 0" }}>That PIN doesn't match.</p>}
-      <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-        <Btn disabled={val.length !== 4} onClick={() => (val === pin ? onOk() : setErr(true))}>Unlock</Btn>
-        <Btn kind="ghost" onClick={onBack}>Back</Btn>
-      </div>
-    </Card>
-  );
-}
-
-function StudentPick({ students, onPick, onCreate, onBack }) {
-  const [name, setName] = useState("");
-  return (
-    <div style={{ marginTop: 16, display: "grid", gap: 14, maxWidth: 480 }}>
-      {students.length > 0 && (
-        <Card>
-          <h2 style={h2Style}>Welcome back</h2>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {students.map((s) => <Btn key={s.id} kind="ghost" onClick={() => onPick(s)}>{s.name}</Btn>)}
-          </div>
-        </Card>
-      )}
-      <Card>
-        <h2 style={h2Style}>New student</h2>
-        <input value={name} onChange={(e) => setName(e.target.value)}
-          placeholder="Your name (e.g. Mia L.)" style={inputStyle} />
-        <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
-          <Btn kind="accent" disabled={!name.trim()} onClick={() => onCreate(name)}>Join the studio</Btn>
-          <Btn kind="ghost" onClick={onBack}>Back</Btn>
+      <Card style={{ maxWidth: 440, margin: "0 auto" }}>
+        <h2 style={h2Style}>
+          {mode === "login" ? "Log in" : mode === "signup" ? "Create your account" : "Reset password"}
+        </h2>
+        {mode === "signup" && (
+          <p style={pMuted}>
+            New students: sign up below, confirm your email, and your teacher will
+            approve you — then you can book lessons.
+          </p>
+        )}
+        <div style={{ display: "grid", gap: 10 }}>
+          {mode === "signup" && (
+            <input value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="Your name (e.g. Mia Lim)" style={inputStyle} />
+          )}
+          <input value={email} onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
+          {mode !== "forgot" && (
+            <input value={pw} onChange={(e) => setPw(e.target.value)}
+              placeholder={mode === "signup" ? "Choose a password (min 6 characters)" : "Password"}
+              type="password"
+              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              onKeyDown={(e) => e.key === "Enter" && (mode === "login" ? login() : signup())}
+              style={inputStyle} />
+          )}
+        </div>
+        {err && <p style={errStyle}>{err}</p>}
+        {ok && <p style={okStyle}>{ok}</p>}
+        <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {mode === "login" && (
+            <Btn disabled={busy || !email || !pw} onClick={login}>{busy ? "Logging in…" : "Log in"}</Btn>
+          )}
+          {mode === "signup" && (
+            <Btn kind="accent" disabled={busy || !email || !pw} onClick={signup}>
+              {busy ? "Creating…" : "Sign up"}
+            </Btn>
+          )}
+          {mode === "forgot" && (
+            <Btn disabled={busy || !email} onClick={forgot}>{busy ? "Sending…" : "Send reset link"}</Btn>
+          )}
+        </div>
+        <div style={{ marginTop: 16, display: "flex", gap: 14, flexWrap: "wrap", fontSize: 13 }}>
+          {mode !== "login" && <LinkBtn onClick={() => { reset(); setMode("login"); }}>Log in</LinkBtn>}
+          {mode !== "signup" && <LinkBtn onClick={() => { reset(); setMode("signup"); }}>New student? Sign up</LinkBtn>}
+          {mode !== "forgot" && <LinkBtn onClick={() => { reset(); setMode("forgot"); }}>Forgot password?</LinkBtn>}
         </div>
       </Card>
     </div>
   );
+}
+
+const LinkBtn = ({ children, onClick }) => (
+  <button onClick={onClick} style={{
+    background: "none", border: "none", padding: 0, cursor: "pointer",
+    color: C.felt, fontWeight: 600, fontSize: 13, fontFamily: "'Inter', sans-serif",
+  }}>{children}</button>
+);
+
+function SetNewPassword({ flash, onDone }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr("");
+    if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (pw !== pw2) { setErr("Passwords don't match."); return; }
+    setBusy(true);
+    const { error } = await sb.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    flash("Password updated — you're logged in.");
+    onDone();
+  };
+
+  return (
+    <Card style={{ maxWidth: 440, margin: "24px auto 0" }}>
+      <h2 style={h2Style}>Choose a new password</h2>
+      <div style={{ display: "grid", gap: 10 }}>
+        <input value={pw} onChange={(e) => setPw(e.target.value)} type="password"
+          placeholder="New password (min 6 characters)" style={inputStyle} />
+        <input value={pw2} onChange={(e) => setPw2(e.target.value)} type="password"
+          placeholder="Repeat new password" style={inputStyle} />
+      </div>
+      {err && <p style={errStyle}>{err}</p>}
+      <Btn style={{ marginTop: 12 }} disabled={busy} onClick={submit}>
+        {busy ? "Saving…" : "Save new password"}
+      </Btn>
+    </Card>
+  );
+}
+
+function ChangePassword({ flash }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr("");
+    if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (pw !== pw2) { setErr("Passwords don't match."); return; }
+    setBusy(true);
+    const { error } = await sb.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setPw(""); setPw2("");
+    flash("Password updated.");
+  };
+
+  return (
+    <Card style={{ marginTop: 14 }}>
+      <h2 style={h2Style}>Change password</h2>
+      <div style={{ display: "grid", gap: 8, maxWidth: 320 }}>
+        <input value={pw} onChange={(e) => setPw(e.target.value)} type="password"
+          placeholder="New password (min 6 characters)" style={inputStyle} />
+        <input value={pw2} onChange={(e) => setPw2(e.target.value)} type="password"
+          placeholder="Repeat new password" style={inputStyle} />
+        {err && <p style={{ ...errStyle, margin: 0 }}>{err}</p>}
+        <Btn disabled={busy || !pw || !pw2} onClick={submit} style={{ justifySelf: "start" }}>
+          {busy ? "Saving…" : "Update password"}
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
+/* ═════════════════════════════════════════════════════════════
+   Shared data hooks/helpers
+   ═════════════════════════════════════════════════════════════ */
+async function fetchSettings() {
+  const { data } = await sb.from("settings").select("*").eq("id", 1).maybeSingle();
+  return data || { id: 1, availability: DEFAULT_AVAIL, lesson_minutes: 60 };
 }
 
 function Tabs({ items, active, onChange, badges = {} }) {
@@ -428,36 +475,119 @@ function Tabs({ items, active, onChange, badges = {} }) {
   );
 }
 
-/* ═══════════ teacher ═══════════ */
-function TeacherHome({ settings, students, bookings, messages, onSettings, onStatus, onNote, onSend, flash }) {
+function upcoming(bookings) {
+  const t = todayKey();
+  return bookings
+    .filter((b) => b.lesson_date >= t && ["pending", "confirmed"].includes(b.status))
+    .sort((a, b) => (a.lesson_date + a.lesson_time).localeCompare(b.lesson_date + b.lesson_time));
+}
+
+/* ═════════════════════════════════════════════════════════════
+   TEACHER
+   ═════════════════════════════════════════════════════════════ */
+function TeacherHome({ me, flash }) {
   const [tab, setTab] = useState("Schedule");
-  const pendingCount = bookings.filter((b) => b.status === "pending").length;
+  const [settings, setSettings] = useState(null);
+  const [profiles, setProfiles] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [messages, setMessages] = useState([]);
+
+  const refresh = useCallback(async () => {
+    const [s, p, b, m] = await Promise.all([
+      fetchSettings(),
+      sb.from("profiles").select("*").order("created_at"),
+      sb.from("bookings").select("*"),
+      sb.from("messages").select("*").order("created_at"),
+    ]);
+    setSettings(s);
+    setProfiles(p.data || []);
+    setBookings(b.data || []);
+    setMessages(m.data || []);
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    const id = setInterval(refresh, 8000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const nameOf = (id) => profiles.find((p) => p.id === id)?.name || "Unknown";
+  const students = profiles.filter((p) => p.role !== "teacher");
+  const pendingStudents = students.filter((p) => p.status === "pending");
+  const approvedStudents = students.filter((p) => p.status === "approved");
+  const pendingBookings = bookings.filter((b) => b.status === "pending").length;
+
+  const setBookingStatus = async (id, status) => {
+    const { error } = await sb.from("bookings").update({ status }).eq("id", id);
+    if (error) flash("Couldn't update: " + error.message);
+    refresh();
+  };
+  const setNote = async (id, note) => {
+    const { error } = await sb.from("bookings").update({ note }).eq("id", id);
+    if (error) flash("Couldn't save note: " + error.message);
+    refresh();
+  };
+  const setStudentStatus = async (id, status) => {
+    const { error } = await sb.from("profiles").update({ status }).eq("id", id);
+    if (error) flash("Couldn't update student: " + error.message);
+    else flash(status === "approved" ? "Student approved." : "Student removed.");
+    refresh();
+  };
+  const send = async (studentId, text) => {
+    if (!text.trim()) return;
+    const { error } = await sb.from("messages").insert({
+      student_id: studentId, sender_id: me.id, sender_role: "teacher",
+      sender_name: "Teacher", text: text.trim(),
+    });
+    if (error) flash("Couldn't send: " + error.message);
+    refresh();
+  };
+  const saveSettings = async (next) => {
+    const { error } = await sb.from("settings").upsert({ id: 1, ...next });
+    if (error) flash("Couldn't save: " + error.message);
+    else flash("Saved.");
+    refresh();
+  };
+
+  if (!settings) return <p style={{ color: C.inkSoft, padding: 24 }}>Loading…</p>;
+
   return (
     <div>
-      <Tabs items={["Schedule", "Requests", "Students", "Messages", "Availability"]}
-        active={tab} onChange={setTab} badges={{ Requests: pendingCount }} />
-      {tab === "Schedule" && <TeacherSchedule bookings={bookings} onStatus={onStatus} onNote={onNote} />}
-      {tab === "Requests" && <Requests bookings={bookings} onStatus={onStatus} />}
-      {tab === "Students" && <Roster students={students} bookings={bookings} />}
-      {tab === "Messages" && <TeacherMessages students={students} messages={messages} onSend={onSend} />}
-      {tab === "Availability" && (
+      <Tabs
+        items={["Schedule", "Requests", "Students", "Messages", "Settings"]}
+        active={tab} onChange={setTab}
+        badges={{ Requests: pendingBookings, Students: pendingStudents.length }} />
+
+      {tab === "Schedule" && (
+        <TeacherSchedule bookings={bookings} nameOf={nameOf}
+          onStatus={setBookingStatus} onNote={setNote} />
+      )}
+
+      {tab === "Requests" && (
+        <Requests bookings={bookings} nameOf={nameOf} onStatus={setBookingStatus} />
+      )}
+
+      {tab === "Students" && (
+        <StudentsAdmin pending={pendingStudents} approved={approvedStudents}
+          bookings={bookings} onApprove={(id) => setStudentStatus(id, "approved")}
+          onRemove={(id) => setStudentStatus(id, "removed")} />
+      )}
+
+      {tab === "Messages" && (
+        <TeacherMessages students={approvedStudents} messages={messages} onSend={send} />
+      )}
+
+      {tab === "Settings" && (
         <React.Fragment>
-          <Availability settings={settings} onSettings={onSettings} flash={flash} />
-          <ChangePin settings={settings} onSettings={onSettings} flash={flash} />
+          <Availability settings={settings} onSave={saveSettings} />
+          <ChangePassword flash={flash} />
         </React.Fragment>
       )}
     </div>
   );
 }
 
-function upcoming(bookings) {
-  const t = todayKey();
-  return bookings
-    .filter((b) => b.date >= t && ["pending", "confirmed"].includes(b.status))
-    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-}
-
-function TeacherSchedule({ bookings, onStatus, onNote }) {
+function TeacherSchedule({ bookings, nameOf, onStatus, onNote }) {
   const list = upcoming(bookings);
   const [editing, setEditing] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
@@ -466,8 +596,7 @@ function TeacherSchedule({ bookings, onStatus, onNote }) {
     return (
       <Card>
         <p style={pMuted}>
-          No upcoming lessons yet. Once students book, they'll appear here —
-          share this website's link with them to get started.
+          No upcoming lessons yet. Once approved students book, lessons appear here.
         </p>
       </Card>
     );
@@ -476,20 +605,20 @@ function TeacherSchedule({ bookings, onStatus, onNote }) {
   return (
     <div style={{ display: "grid", gap: 10 }}>
       {list.map((b) => {
-        const showDate = b.date !== lastDate;
-        lastDate = b.date;
+        const showDate = b.lesson_date !== lastDate;
+        lastDate = b.lesson_date;
         return (
           <div key={b.id}>
             {showDate && (
               <p style={{ fontFamily: "'Fraunces', Georgia, serif", fontSize: 16, fontWeight: 600, margin: "14px 0 8px" }}>
-                {niceDate(b.date)}
+                {niceDate(b.lesson_date)}
               </p>
             )}
             <Card style={{ display: "grid", gap: 8 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div>
-                  <strong style={{ fontSize: 15 }}>{niceTime(b.time)}</strong>
-                  <span style={{ color: C.inkSoft }}> — {b.studentName}</span>
+                  <strong style={{ fontSize: 15 }}>{niceTime(b.lesson_time)}</strong>
+                  <span style={{ color: C.inkSoft }}> — {nameOf(b.student_id)}</span>
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <Tag tone={b.status}>{b.status}</Tag>
@@ -524,18 +653,18 @@ function TeacherSchedule({ bookings, onStatus, onNote }) {
   );
 }
 
-function Requests({ bookings, onStatus }) {
+function Requests({ bookings, nameOf, onStatus }) {
   const pending = bookings.filter((b) => b.status === "pending")
-    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+    .sort((a, b) => (a.lesson_date + a.lesson_time).localeCompare(b.lesson_date + b.lesson_time));
   if (pending.length === 0)
-    return <Card><p style={pMuted}>No requests waiting. You're all caught up.</p></Card>;
+    return <Card><p style={pMuted}>No lesson requests waiting. You're all caught up.</p></Card>;
   return (
     <div style={{ display: "grid", gap: 10 }}>
       {pending.map((b) => (
         <Card key={b.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <div>
-            <strong>{b.studentName}</strong>
-            <span style={{ color: C.inkSoft }}> · {niceDate(b.date)} at {niceTime(b.time)}</span>
+            <strong>{nameOf(b.student_id)}</strong>
+            <span style={{ color: C.inkSoft }}> · {niceDate(b.lesson_date)} at {niceTime(b.lesson_time)}</span>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <Btn style={{ background: C.green, padding: "8px 14px" }}
@@ -548,33 +677,84 @@ function Requests({ bookings, onStatus }) {
   );
 }
 
-function Roster({ students, bookings }) {
-  if (students.length === 0)
-    return (
-      <Card>
-        <p style={pMuted}>No students yet. When a student opens this site and joins, they'll show up here.</p>
-      </Card>
-    );
+function StudentsAdmin({ pending, approved, bookings, onApprove, onRemove }) {
+  const [confirmRemove, setConfirmRemove] = useState(null);
   return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {students.map((s) => {
-        const theirs = bookings.filter((b) => b.studentId === s.id);
-        const done = theirs.filter((b) => b.status === "confirmed" && b.date < todayKey()).length;
-        const next = upcoming(theirs).find((b) => b.status === "confirmed");
-        return (
-          <Card key={s.id}>
-            <strong style={{ fontSize: 15 }}>{s.name}</strong>
-            <p style={{ ...pMuted, margin: "4px 0 0", fontSize: 13 }}>
-              {done} past lesson{done === 1 ? "" : "s"} ·{" "}
-              {next ? `next: ${niceDate(next.date)} at ${niceTime(next.time)}` : "no upcoming lesson booked"}
-            </p>
-          </Card>
-        );
-      })}
+    <div style={{ display: "grid", gap: 16 }}>
+      <div>
+        <h2 style={h2Style}>Waiting for approval</h2>
+        {pending.length === 0 ? (
+          <Card><p style={pMuted}>No new sign-ups waiting.</p></Card>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {pending.map((s) => (
+              <Card key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div>
+                  <strong>{s.name || "(no name)"}</strong>
+                  <span style={{ color: C.inkSoft, fontSize: 13 }}> · {s.email}</span>
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Btn style={{ background: C.green, padding: "8px 14px" }}
+                    onClick={() => onApprove(s.id)}>Approve</Btn>
+                  <Btn kind="ghost" onClick={() => onRemove(s.id)}>Reject</Btn>
+                </div>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <h2 style={h2Style}>My students</h2>
+        {approved.length === 0 ? (
+          <Card><p style={pMuted}>No approved students yet.</p></Card>
+        ) : (
+          <div style={{ display: "grid", gap: 10 }}>
+            {approved.map((s) => {
+              const theirs = bookings.filter((b) => b.student_id === s.id);
+              const done = theirs.filter((b) => b.status === "confirmed" && b.lesson_date < todayKey()).length;
+              const next = upcoming(theirs).find((b) => b.status === "confirmed");
+              return (
+                <Card key={s.id}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                    <div>
+                      <strong style={{ fontSize: 15 }}>{s.name}</strong>
+                      <span style={{ color: C.inkSoft, fontSize: 13 }}> · {s.email}</span>
+                      <p style={{ ...pMuted, margin: "4px 0 0", fontSize: 13 }}>
+                        {done} past lesson{done === 1 ? "" : "s"} ·{" "}
+                        {next ? `next: ${niceDate(next.lesson_date)} at ${niceTime(next.lesson_time)}` : "no upcoming lesson booked"}
+                      </p>
+                    </div>
+                    {confirmRemove === s.id ? (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 13, color: C.felt }}>Remove {s.name}?</span>
+                        <Btn kind="accent" style={{ padding: "6px 12px" }}
+                          onClick={() => { onRemove(s.id); setConfirmRemove(null); }}>Yes, remove</Btn>
+                        <Btn kind="ghost" style={{ padding: "6px 12px" }}
+                          onClick={() => setConfirmRemove(null)}>Keep</Btn>
+                      </div>
+                    ) : (
+                      <Btn kind="ghost" style={{ padding: "6px 12px", fontSize: 13 }}
+                        onClick={() => setConfirmRemove(s.id)}>Remove</Btn>
+                    )}
+                  </div>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+        <p style={{ ...pMuted, fontSize: 12, marginTop: 10 }}>
+          Removed students keep their login but lose all access to the studio — they
+          see an "account inactive" notice and can no longer book or message. You can
+          re-approve someone later from this screen if they sign in again and appear
+          under "Waiting for approval", or just ask Claude to add a re-activate list.
+        </p>
+      </div>
     </div>
   );
 }
 
+/* ── messaging ── */
 function Thread({ msgs, meRole }) {
   const endRef = useRef(null);
   useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [msgs.length]);
@@ -582,7 +762,7 @@ function Thread({ msgs, meRole }) {
     <div style={{ maxHeight: 300, overflowY: "auto", display: "grid", gap: 8, padding: "4px 2px" }}>
       {msgs.length === 0 && <p style={{ ...pMuted, fontSize: 13 }}>No messages yet — say hello.</p>}
       {msgs.map((m) => {
-        const mine = m.fromRole === meRole;
+        const mine = m.sender_role === meRole;
         return (
           <div key={m.id} style={{
             justifySelf: mine ? "end" : "start", maxWidth: "80%",
@@ -590,7 +770,7 @@ function Thread({ msgs, meRole }) {
             padding: "8px 12px", borderRadius: 12, fontSize: 14,
           }}>
             <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 2 }}>
-              {m.fromName} · {new Date(m.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+              {m.sender_name} · {new Date(m.created_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
             </div>
             {m.text}
           </div>
@@ -618,8 +798,8 @@ function TeacherMessages({ students, messages, onSend }) {
   const [sel, setSel] = useState(students[0]?.id || null);
   useEffect(() => { if (!sel && students[0]) setSel(students[0].id); }, [students, sel]);
   if (students.length === 0)
-    return <Card><p style={pMuted}>Messages will appear once a student joins.</p></Card>;
-  const msgs = messages.filter((m) => m.studentId === sel).sort((a, b) => a.ts - b.ts);
+    return <Card><p style={pMuted}>Messages appear once you have approved students.</p></Card>;
+  const msgs = messages.filter((m) => m.student_id === sel);
   return (
     <Card>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 }}>
@@ -638,41 +818,10 @@ function TeacherMessages({ students, messages, onSend }) {
   );
 }
 
-function ChangePin({ settings, onSettings, flash }) {
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [err, setErr] = useState("");
-
-  const submit = async () => {
-    if (current !== settings.pin) { setErr("Current PIN doesn't match."); return; }
-    if (next.length !== 4) { setErr("New PIN must be 4 digits."); return; }
-    await onSettings({ ...settings, pin: next });
-    setCurrent(""); setNext(""); setErr("");
-    flash("PIN updated.");
-  };
-
-  return (
-    <Card style={{ marginTop: 14 }}>
-      <h2 style={h2Style}>Change teacher PIN</h2>
-      <p style={pMuted}>Enter your current PIN, then choose a new 4-digit PIN.</p>
-      <div style={{ display: "grid", gap: 8, maxWidth: 320 }}>
-        <input value={current}
-          onChange={(e) => { setErr(""); setCurrent(e.target.value.replace(/\D/g, "").slice(0, 4)); }}
-          placeholder="Current PIN" inputMode="numeric" style={inputStyle} />
-        <input value={next}
-          onChange={(e) => { setErr(""); setNext(e.target.value.replace(/\D/g, "").slice(0, 4)); }}
-          placeholder="New 4-digit PIN" inputMode="numeric" style={inputStyle} />
-        {err && <p style={{ color: C.felt, fontSize: 13, margin: 0 }}>{err}</p>}
-        <Btn disabled={current.length !== 4 || next.length !== 4} onClick={submit}
-          style={{ justifySelf: "start" }}>Update PIN</Btn>
-      </div>
-    </Card>
-  );
-}
-
-function Availability({ settings, onSettings, flash }) {
-  const [draft, setDraft] = useState(settings.availability);
-  useEffect(() => setDraft(settings.availability), [settings.availability]);
+/* ── availability editor ── */
+function Availability({ settings, onSave }) {
+  const [draft, setDraft] = useState(settings.availability || DEFAULT_AVAIL);
+  useEffect(() => setDraft(settings.availability || DEFAULT_AVAIL), [settings]);
 
   const toggle = (day, time) => {
     const cur = new Set(draft[day] || []);
@@ -685,7 +834,6 @@ function Availability({ settings, onSettings, flash }) {
       <h2 style={h2Style}>Weekly availability</h2>
       <p style={pMuted}>
         Tap times to open or close them. Students can only request open times.
-        Lessons are {settings.lessonMinutes} minutes.
       </p>
       <div style={{ overflowX: "auto" }}>
         <table style={{ borderCollapse: "separate", borderSpacing: 4 }}>
@@ -729,48 +877,117 @@ function Availability({ settings, onSettings, flash }) {
       <p style={{ ...pMuted, fontSize: 12, marginTop: 8 }}>
         White keys are open for booking; black keys are closed.
       </p>
-      <Btn style={{ marginTop: 8 }}
-        onClick={async () => { await onSettings({ ...settings, availability: draft }); flash("Availability saved."); }}>
+      <Btn style={{ marginTop: 8 }} onClick={() => onSave({ availability: draft })}>
         Save availability
       </Btn>
     </Card>
   );
 }
 
-/* ═══════════ student ═══════════ */
-function StudentHome({ me, settings, bookings, messages, onRequest, onCancel, onSend }) {
+/* ═════════════════════════════════════════════════════════════
+   STUDENT
+   ═════════════════════════════════════════════════════════════ */
+function StudentHome({ me, flash, onSignOut }) {
   const [tab, setTab] = useState("Book a lesson");
-  const mine = bookings.filter((b) => b.studentId === me.id);
-  const msgs = messages.filter((m) => m.studentId === me.id).sort((a, b) => a.ts - b.ts);
+  const [settings, setSettings] = useState(null);
+  const [mine, setMine] = useState([]);
+  const [taken, setTaken] = useState([]);
+  const [messages, setMessages] = useState([]);
+
+  const refresh = useCallback(async () => {
+    const [s, b, t, m] = await Promise.all([
+      fetchSettings(),
+      sb.from("bookings").select("*").eq("student_id", me.id),
+      sb.rpc("taken_slots"),
+      sb.from("messages").select("*").eq("student_id", me.id).order("created_at"),
+    ]);
+    setSettings(s);
+    setMine(b.data || []);
+    setTaken(t.data || []);
+    setMessages(m.data || []);
+  }, [me.id]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    const id = setInterval(refresh, 8000);
+    return () => clearInterval(id);
+  }, [refresh]);
+
+  const request = async (dateKey, time) => {
+    const { error } = await sb.from("bookings").insert({
+      student_id: me.id, lesson_date: dateKey, lesson_time: time, status: "pending",
+    });
+    if (error) {
+      if (error.code === "23505") flash("That time was just taken — pick another.");
+      else flash("Couldn't book: " + error.message);
+    } else {
+      flash("Request sent — your teacher will confirm it.");
+    }
+    refresh();
+  };
+
+  const cancel = async (id) => {
+    const { error } = await sb.from("bookings").update({ status: "cancelled" }).eq("id", id);
+    if (error) flash("Couldn't cancel: " + error.message);
+    refresh();
+  };
+
+  const send = async (text) => {
+    if (!text.trim()) return;
+    const { error } = await sb.from("messages").insert({
+      student_id: me.id, sender_id: me.id, sender_role: "student",
+      sender_name: me.name || me.email, text: text.trim(),
+    });
+    if (error) flash("Couldn't send: " + error.message);
+    refresh();
+  };
+
+  if (!settings) return <p style={{ color: C.inkSoft, padding: 24 }}>Loading…</p>;
 
   return (
     <div>
-      <Tabs items={["Book a lesson", "My lessons", "Messages"]} active={tab} onChange={setTab} />
-      {tab === "Book a lesson" && <BookLesson settings={settings} bookings={bookings} onRequest={onRequest} />}
-      {tab === "My lessons" && <MyLessons mine={mine} onCancel={onCancel} />}
+      <Tabs items={["Book a lesson", "My lessons", "Messages", "Account"]}
+        active={tab} onChange={setTab} />
+      {tab === "Book a lesson" && (
+        <BookLesson settings={settings} taken={taken} mine={mine} onRequest={request} />
+      )}
+      {tab === "My lessons" && <MyLessons mine={mine} onCancel={cancel} />}
       {tab === "Messages" && (
         <Card>
-          <Thread msgs={msgs} meRole="student" />
-          <Composer onSend={onSend} />
+          <Thread msgs={messages} meRole="student" />
+          <Composer onSend={send} />
         </Card>
+      )}
+      {tab === "Account" && (
+        <React.Fragment>
+          <Card>
+            <h2 style={h2Style}>Your account</h2>
+            <p style={pMuted}>
+              Signed in as <strong>{me.name}</strong> ({me.email}).
+            </p>
+            <Btn kind="ghost" onClick={onSignOut}>Sign out</Btn>
+          </Card>
+          <ChangePassword flash={flash} />
+        </React.Fragment>
       )}
     </div>
   );
 }
 
-function BookLesson({ settings, bookings, onRequest }) {
+function BookLesson({ settings, taken, mine, onRequest }) {
   const days = [];
   for (let i = 1; i <= 14; i++) {
     const d = new Date(); d.setDate(d.getDate() + i); days.push(d);
   }
-  const firstWithSlots = days.find((d) => (settings.availability[d.getDay()] || []).length > 0);
+  const avail = settings.availability || DEFAULT_AVAIL;
+  const firstWithSlots = days.find((d) => (avail[d.getDay()] || []).length > 0);
   const [selDay, setSelDay] = useState(firstWithSlots ? fmtDateKey(firstWithSlots) : fmtDateKey(days[0]));
 
-  const taken = new Set(
-    bookings.filter((b) => b.date === selDay && ["pending", "confirmed"].includes(b.status)).map((b) => b.time)
+  const takenSet = new Set(
+    taken.filter((t) => t.lesson_date === selDay).map((t) => t.lesson_time)
   );
   const dayIdx = parseDateKey(selDay).getDay();
-  const slots = settings.availability[dayIdx] || [];
+  const slots = avail[dayIdx] || [];
 
   return (
     <Card>
@@ -778,7 +995,7 @@ function BookLesson({ settings, bookings, onRequest }) {
       <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 14 }}>
         {days.map((d) => {
           const k = fmtDateKey(d);
-          const has = (settings.availability[d.getDay()] || []).length > 0;
+          const has = (avail[d.getDay()] || []).length > 0;
           const sel = k === selDay;
           return (
             <button key={k} onClick={() => setSelDay(k)} disabled={!has} style={{
@@ -801,7 +1018,7 @@ function BookLesson({ settings, bookings, onRequest }) {
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           {slots.map((t) => {
-            const isTaken = taken.has(t);
+            const isTaken = takenSet.has(t);
             return (
               <button key={t} disabled={isTaken} onClick={() => onRequest(selDay, t)} style={{
                 width: 84, padding: "14px 0 10px", borderRadius: "0 0 8px 8px",
@@ -829,10 +1046,10 @@ function BookLesson({ settings, bookings, onRequest }) {
 
 function MyLessons({ mine, onCancel }) {
   const t = todayKey();
-  const future = mine.filter((b) => b.date >= t && b.status !== "cancelled")
-    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-  const past = mine.filter((b) => b.date < t && b.status === "confirmed")
-    .sort((a, b) => (b.date + b.time).localeCompare(a.date + a.time));
+  const future = mine.filter((b) => b.lesson_date >= t && b.status !== "cancelled")
+    .sort((a, b) => (a.lesson_date + a.lesson_time).localeCompare(b.lesson_date + b.lesson_time));
+  const past = mine.filter((b) => b.lesson_date < t && b.status === "confirmed")
+    .sort((a, b) => (b.lesson_date + b.lesson_time).localeCompare(a.lesson_date + a.lesson_time));
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -845,8 +1062,8 @@ function MyLessons({ mine, onCancel }) {
             {future.map((b) => (
               <Card key={b.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div>
-                  <strong>{niceDate(b.date)}</strong>
-                  <span style={{ color: C.inkSoft }}> at {niceTime(b.time)}</span>
+                  <strong>{niceDate(b.lesson_date)}</strong>
+                  <span style={{ color: C.inkSoft }}> at {niceTime(b.lesson_time)}</span>
                 </div>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <Tag tone={b.status}>{b.status}</Tag>
@@ -866,8 +1083,8 @@ function MyLessons({ mine, onCancel }) {
           <div style={{ display: "grid", gap: 10 }}>
             {past.map((b) => (
               <Card key={b.id}>
-                <strong>{niceDate(b.date)}</strong>
-                <span style={{ color: C.inkSoft }}> at {niceTime(b.time)}</span>
+                <strong>{niceDate(b.lesson_date)}</strong>
+                <span style={{ color: C.inkSoft }}> at {niceTime(b.lesson_time)}</span>
                 {b.note && <p style={{ ...pMuted, margin: "6px 0 0", fontSize: 13 }}>♪ {b.note}</p>}
               </Card>
             ))}
@@ -878,7 +1095,7 @@ function MyLessons({ mine, onCancel }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<PianoStudio />);
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 </script>
 </body>
 </html>
