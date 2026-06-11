@@ -336,6 +336,22 @@ function AuthScreen({ flash, teacherExists }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [ok, setOk] = useState("");
+  const [sentTo, setSentTo] = useState(null); // email we sent a confirmation to
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setInterval(() => setCooldown((c) => c - 1), 1000);
+    return () => clearInterval(id);
+  }, [cooldown > 0]);
+
+  const resend = async () => {
+    setErr("");
+    const { error } = await sb.auth.resend({ type: "signup", email: sentTo });
+    if (error) { setErr("Couldn't resend: " + error.message); return; }
+    setOk("Confirmation email sent again — give it a minute and check spam too.");
+    setCooldown(60);
+  };
 
   const reset = () => { setErr(""); setOk(""); };
 
@@ -360,7 +376,8 @@ function AuthScreen({ flash, teacherExists }) {
     });
     setBusy(false);
     if (error) { setErr("Sign-up failed: " + error.message); return; }
-    setOk("Almost done! We've emailed you a confirmation link. Click it, then come back here and log in.");
+    setSentTo(email.trim());
+    setCooldown(60);
   };
 
   const forgot = async () => {
@@ -384,6 +401,32 @@ function AuthScreen({ flash, teacherExists }) {
         </Card>
       )}
       <Card style={{ maxWidth: 440, margin: "0 auto" }}>
+        {sentTo ? (
+          <React.Fragment>
+            <h2 style={h2Style}>Check your email ✉️</h2>
+            <p style={pMuted}>
+              We've sent a confirmation link to <strong>{sentTo}</strong>.
+              Click the link in that email, then come back here and log in.
+              Don't forget to check your spam folder.
+            </p>
+            {err && <p style={errStyle}>{err}</p>}
+            {ok && <p style={okStyle}>{ok}</p>}
+            <div style={{ marginTop: 14, display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Btn disabled={cooldown > 0} onClick={resend}>
+                {cooldown > 0 ? `Resend email (${cooldown}s)` : "Resend confirmation email"}
+              </Btn>
+              <Btn kind="ghost" onClick={() => { setSentTo(null); setErr(""); setOk(""); setMode("login"); }}>
+                Back to log in
+              </Btn>
+            </div>
+            <div style={{ marginTop: 16, fontSize: 13 }}>
+              <LinkBtn onClick={() => { setSentTo(null); setErr(""); setOk(""); }}>
+                Wrong email? Sign up again
+              </LinkBtn>
+            </div>
+          </React.Fragment>
+        ) : (
+        <React.Fragment>
         <h2 style={h2Style}>
           {mode === "login" ? "Log in"
             : mode === "signup" ? (teacherExists ? "Create your account" : "Teacher sign-up")
@@ -443,6 +486,8 @@ function AuthScreen({ flash, teacherExists }) {
           )}
           {mode !== "forgot" && <LinkBtn onClick={() => { reset(); setMode("forgot"); }}>Forgot password?</LinkBtn>}
         </div>
+        </React.Fragment>
+        )}
       </Card>
     </div>
   );
@@ -519,6 +564,46 @@ function ChangePassword({ flash }) {
         {err && <p style={{ ...errStyle, margin: 0 }}>{err}</p>}
         <Btn disabled={busy || !pw || !pw2} onClick={submit} style={{ justifySelf: "start" }}>
           {busy ? "Saving…" : "Update password"}
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
+function ChangeEmail({ me, flash }) {
+  const [email, setEmail] = useState("");
+  const [err, setErr] = useState("");
+  const [ok, setOk] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr(""); setOk("");
+    if (!/\S+@\S+\.\S+/.test(email)) { setErr("Please enter a valid email address."); return; }
+    setBusy(true);
+    const { error } = await sb.auth.updateUser(
+      { email: email.trim() },
+      { emailRedirectTo: SITE_URL }
+    );
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    setOk("Confirmation links sent! Check BOTH your current inbox and the new one, and click the link in each to complete the change.");
+    setEmail("");
+  };
+
+  return (
+    <Card style={{ marginTop: 14 }}>
+      <h2 style={h2Style}>Change email address</h2>
+      <p style={pMuted}>
+        Currently signed in as <strong>{me.email}</strong>. For security, you'll
+        receive confirmation links at both your current and new address.
+      </p>
+      <div style={{ display: "grid", gap: 8, maxWidth: 320 }}>
+        <input value={email} onChange={(e) => { setErr(""); setOk(""); setEmail(e.target.value); }}
+          type="email" placeholder="New email address" style={inputStyle} />
+        {err && <p style={{ ...errStyle, margin: 0 }}>{err}</p>}
+        {ok && <p style={{ ...okStyle, margin: 0 }}>{ok}</p>}
+        <Btn disabled={busy || !email} onClick={submit} style={{ justifySelf: "start" }}>
+          {busy ? "Sending…" : "Change email"}
         </Btn>
       </div>
     </Card>
@@ -661,6 +746,7 @@ function TeacherHome({ me, flash }) {
       {tab === "Settings" && (
         <React.Fragment>
           <Availability settings={settings} onSave={saveSettings} />
+          <ChangeEmail me={me} flash={flash} />
           <ChangePassword flash={flash} />
         </React.Fragment>
       )}
@@ -1048,6 +1134,7 @@ function StudentHome({ me, flash, onSignOut }) {
             </p>
             <Btn kind="ghost" onClick={onSignOut}>Sign out</Btn>
           </Card>
+          <ChangeEmail me={me} flash={flash} />
           <ChangePassword flash={flash} />
         </React.Fragment>
       )}
