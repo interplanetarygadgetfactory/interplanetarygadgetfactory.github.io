@@ -370,33 +370,39 @@ function AuthScreen({ flash, teacherExists }) {
     if (!name.trim()) { setErr("Please enter your name."); return; }
     if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
     setBusy(true);
-    const { data, error } = await sb.auth.signUp({
-      email: email.trim(), password: pw,
-      options: { emailRedirectTo: SITE_URL, data: { name: name.trim() } },
-    });
-    setBusy(false);
-    if (error) { setErr("Sign-up failed: " + error.message); return; }
 
-    // Supabase signals an already-registered email by returning a user
-    // with an empty identities array (it never errors, to avoid leaking
-    // which emails exist).
-    const alreadyRegistered =
-      data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0;
+    // Check whether this email is already in the system before doing anything.
+    const { data: status, error: statusErr } = await sb.rpc("email_status", { check_email: email.trim() });
+    if (statusErr) {
+      setBusy(false);
+      setErr("Sign-up check failed: " + statusErr.message + " — (the email_status function may be missing from the database; see setup guide.)");
+      return;
+    }
 
-    if (alreadyRegistered) {
-      // Unverified account? Resend the verification email. Verified one?
-      // The resend fails, so send them to log in instead.
+    if (status === "verified") {
+      setBusy(false);
+      setErr("This email is already registered and verified. Please log in instead — or use \"Forgot password?\" if you've lost access.");
+      return;
+    }
+
+    if (status === "unverified") {
+      // Account exists but was never verified — just send a fresh link.
       const r = await sb.auth.resend({ type: "signup", email: email.trim() });
-      if (r.error) {
-        setErr("This email is already registered and verified. Please log in — or use \"Forgot password?\" if you've lost access.");
-        return;
-      }
+      setBusy(false);
+      if (r.error) { setErr("Couldn't send verification email: " + r.error.message); return; }
       setSentTo(email.trim());
       setCooldown(60);
       setOk("This email was registered earlier but never verified — we've sent a fresh verification link.");
       return;
     }
 
+    // Brand-new email — normal sign-up.
+    const { error } = await sb.auth.signUp({
+      email: email.trim(), password: pw,
+      options: { emailRedirectTo: SITE_URL, data: { name: name.trim() } },
+    });
+    setBusy(false);
+    if (error) { setErr("Sign-up failed: " + error.message); return; }
     setSentTo(email.trim());
     setCooldown(60);
   };
