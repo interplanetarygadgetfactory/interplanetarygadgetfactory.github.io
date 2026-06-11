@@ -331,6 +331,22 @@ function AuthScreen({ flash, teacherExists }) {
   const [mode, setMode] = useState(teacherExists ? "login" : "signup"); // login | signup | forgot
   useEffect(() => { if (!teacherExists) setMode("signup"); }, [teacherExists]);
   const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [unameStatus, setUnameStatus] = useState(null); // null | checking | available | taken | invalid
+  const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{2,19}$/;
+
+  useEffect(() => {
+    if (mode !== "signup") return;
+    if (!username) { setUnameStatus(null); return; }
+    if (!USERNAME_RE.test(username)) { setUnameStatus("invalid"); return; }
+    setUnameStatus("checking");
+    const t = setTimeout(async () => {
+      const { data, error } = await sb.rpc("username_available", { check_username: username });
+      if (error) { setUnameStatus(null); return; }
+      setUnameStatus(data ? "available" : "taken");
+    }, 500);
+    return () => clearTimeout(t);
+  }, [username, mode]);
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
@@ -357,7 +373,18 @@ function AuthScreen({ flash, teacherExists }) {
 
   const login = async () => {
     reset(); setBusy(true);
-    const { error } = await sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+    let loginEmail = email.trim();
+    if (!loginEmail.includes("@")) {
+      // Treat it as a username — look up the matching email.
+      const { data, error } = await sb.rpc("email_for_username", { check_username: loginEmail });
+      if (error || !data) {
+        setBusy(false);
+        setErr("No account found with that username.");
+        return;
+      }
+      loginEmail = data;
+    }
+    const { error } = await sb.auth.signInWithPassword({ email: loginEmail, password: pw });
     setBusy(false);
     if (error) {
       if (/confirm/i.test(error.message)) setErr("Please confirm your email first — check your inbox (and spam) for the confirmation link.");
@@ -368,8 +395,15 @@ function AuthScreen({ flash, teacherExists }) {
   const signup = async () => {
     reset();
     if (!name.trim()) { setErr("Please enter your name."); return; }
+    if (!USERNAME_RE.test(username)) { setErr("Username must be 3–20 characters, start with a letter, and use only letters, numbers, or underscores."); return; }
+    if (unameStatus === "taken") { setErr("That username is taken — please choose another."); return; }
     if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
     setBusy(true);
+
+    // Final availability check at submit time (the live check may be stale).
+    const { data: avail, error: availErr } = await sb.rpc("username_available", { check_username: username });
+    if (availErr) { setBusy(false); setErr("Couldn't verify username: " + availErr.message); return; }
+    if (!avail) { setBusy(false); setUnameStatus("taken"); setErr("That username was just taken — please choose another."); return; }
 
     // Check whether this email is already in the system before doing anything.
     const { data: status, error: statusErr } = await sb.rpc("email_status", { check_email: email.trim() });
@@ -399,7 +433,7 @@ function AuthScreen({ flash, teacherExists }) {
     // Brand-new email — normal sign-up.
     const { error } = await sb.auth.signUp({
       email: email.trim(), password: pw,
-      options: { emailRedirectTo: SITE_URL, data: { name: name.trim() } },
+      options: { emailRedirectTo: SITE_URL, data: { name: name.trim(), username: username } },
     });
     setBusy(false);
     if (error) { setErr("Sign-up failed: " + error.message); return; }
@@ -475,11 +509,24 @@ function AuthScreen({ flash, teacherExists }) {
         )}
         <div style={{ display: "grid", gap: 10 }}>
           {mode === "signup" && (
-            <input value={name} onChange={(e) => setName(e.target.value)}
-              placeholder="Your name (e.g. Mia Lim)" style={inputStyle} />
+            <React.Fragment>
+              <input value={name} onChange={(e) => setName(e.target.value)}
+                placeholder="Your name (e.g. Mia Lim)" style={inputStyle} />
+              <div>
+                <input value={username}
+                  onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
+                  placeholder="Choose a username (min 3 letters)" autoComplete="off"
+                  style={inputStyle} />
+                {unameStatus === "checking" && <p style={{ ...pMuted, fontSize: 12, margin: "4px 0 0" }}>Checking availability…</p>}
+                {unameStatus === "available" && <p style={{ ...okStyle, fontSize: 12, margin: "4px 0 0" }}>✓ "{username}" is available</p>}
+                {unameStatus === "taken" && <p style={{ ...errStyle, fontSize: 12, margin: "4px 0 0" }}>✗ "{username}" is already taken</p>}
+                {unameStatus === "invalid" && <p style={{ ...errStyle, fontSize: 12, margin: "4px 0 0" }}>3–20 characters, starts with a letter; letters, numbers, underscores only</p>}
+              </div>
+            </React.Fragment>
           )}
           <input value={email} onChange={(e) => setEmail(e.target.value)}
-            placeholder="Email" type="email" autoComplete="email" style={inputStyle} />
+            placeholder={mode === "login" ? "Email or username" : "Email"}
+            type={mode === "login" ? "text" : "email"} autoComplete="email" style={inputStyle} />
           {mode !== "forgot" && (
             <input value={pw} onChange={(e) => setPw(e.target.value)}
               placeholder={mode === "signup" ? "Choose a password (min 6 characters)" : "Password"}
@@ -496,7 +543,7 @@ function AuthScreen({ flash, teacherExists }) {
             <Btn disabled={busy || !email || !pw} onClick={login}>{busy ? "Logging in…" : "Log in"}</Btn>
           )}
           {mode === "signup" && (
-            <Btn kind="accent" disabled={busy || !email || !pw} onClick={signup}>
+            <Btn kind="accent" disabled={busy || !email || !pw || unameStatus !== "available"} onClick={signup}>
               {busy ? "Creating…" : teacherExists ? "Sign up" : "Sign up as teacher"}
             </Btn>
           )}
@@ -631,6 +678,59 @@ function ChangeEmail({ me, flash }) {
         {ok && <p style={{ ...okStyle, margin: 0 }}>{ok}</p>}
         <Btn disabled={busy || !email} onClick={submit} style={{ justifySelf: "start" }}>
           {busy ? "Sending…" : "Change email"}
+        </Btn>
+      </div>
+    </Card>
+  );
+}
+
+function ChangeUsername({ me, flash }) {
+  const [username, setUsername] = useState("");
+  const [status, setStatus] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const USERNAME_RE = /^[A-Za-z][A-Za-z0-9_]{2,19}$/;
+
+  useEffect(() => {
+    if (!username) { setStatus(null); return; }
+    if (!USERNAME_RE.test(username)) { setStatus("invalid"); return; }
+    setStatus("checking");
+    const t = setTimeout(async () => {
+      const { data, error } = await sb.rpc("username_available", { check_username: username });
+      if (error) { setStatus(null); return; }
+      setStatus(data ? "available" : "taken");
+    }, 500);
+    return () => clearTimeout(t);
+  }, [username]);
+
+  const submit = async () => {
+    setErr(""); setBusy(true);
+    const { data, error } = await sb.rpc("change_username", { new_username: username });
+    setBusy(false);
+    if (error) { setErr(error.message); return; }
+    if (data === "taken") { setStatus("taken"); setErr("That username was just taken."); return; }
+    if (data === "invalid") { setErr("Username must be 3–20 characters, start with a letter; letters, numbers, underscores only."); return; }
+    flash("Username updated to " + username + ".");
+    setUsername("");
+  };
+
+  return (
+    <Card style={{ marginTop: 14 }}>
+      <h2 style={h2Style}>Change username</h2>
+      <p style={pMuted}>
+        Current username: <strong>{me.username || "(none set)"}</strong>. You can
+        log in with your username or your email.
+      </p>
+      <div style={{ display: "grid", gap: 8, maxWidth: 320 }}>
+        <input value={username} onChange={(e) => setUsername(e.target.value.replace(/\s/g, ""))}
+          placeholder="New username" autoComplete="off" style={inputStyle} />
+        {status === "checking" && <p style={{ ...pMuted, fontSize: 12, margin: 0 }}>Checking availability…</p>}
+        {status === "available" && <p style={{ ...okStyle, fontSize: 12, margin: 0 }}>✓ "{username}" is available</p>}
+        {status === "taken" && <p style={{ ...errStyle, fontSize: 12, margin: 0 }}>✗ "{username}" is already taken</p>}
+        {status === "invalid" && <p style={{ ...errStyle, fontSize: 12, margin: 0 }}>3–20 characters, starts with a letter; letters, numbers, underscores only</p>}
+        {err && <p style={{ ...errStyle, margin: 0 }}>{err}</p>}
+        <Btn disabled={busy || status !== "available"} onClick={submit} style={{ justifySelf: "start" }}>
+          {busy ? "Saving…" : "Update username"}
         </Btn>
       </div>
     </Card>
@@ -773,6 +873,7 @@ function TeacherHome({ me, flash }) {
       {tab === "Settings" && (
         <React.Fragment>
           <Availability settings={settings} onSave={saveSettings} />
+          <ChangeUsername me={me} flash={flash} />
           <ChangeEmail me={me} flash={flash} />
           <ChangePassword flash={flash} />
         </React.Fragment>
@@ -1157,10 +1258,12 @@ function StudentHome({ me, flash, onSignOut }) {
           <Card>
             <h2 style={h2Style}>Your account</h2>
             <p style={pMuted}>
-              Signed in as <strong>{me.name}</strong> ({me.email}).
+              Signed in as <strong>{me.name}</strong> ({me.email})
+              {me.username ? <span> · username: <strong>{me.username}</strong></span> : null}.
             </p>
             <Btn kind="ghost" onClick={onSignOut}>Sign out</Btn>
           </Card>
+          <ChangeUsername me={me} flash={flash} />
           <ChangeEmail me={me} flash={flash} />
           <ChangePassword flash={flash} />
         </React.Fragment>
