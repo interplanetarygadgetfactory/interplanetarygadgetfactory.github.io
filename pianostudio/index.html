@@ -370,12 +370,33 @@ function AuthScreen({ flash, teacherExists }) {
     if (!name.trim()) { setErr("Please enter your name."); return; }
     if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
     setBusy(true);
-    const { error } = await sb.auth.signUp({
+    const { data, error } = await sb.auth.signUp({
       email: email.trim(), password: pw,
       options: { emailRedirectTo: SITE_URL, data: { name: name.trim() } },
     });
     setBusy(false);
     if (error) { setErr("Sign-up failed: " + error.message); return; }
+
+    // Supabase signals an already-registered email by returning a user
+    // with an empty identities array (it never errors, to avoid leaking
+    // which emails exist).
+    const alreadyRegistered =
+      data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0;
+
+    if (alreadyRegistered) {
+      // Unverified account? Resend the verification email. Verified one?
+      // The resend fails, so send them to log in instead.
+      const r = await sb.auth.resend({ type: "signup", email: email.trim() });
+      if (r.error) {
+        setErr("This email is already registered and verified. Please log in — or use \"Forgot password?\" if you've lost access.");
+        return;
+      }
+      setSentTo(email.trim());
+      setCooldown(60);
+      setOk("This email was registered earlier but never verified — we've sent a fresh verification link.");
+      return;
+    }
+
     setSentTo(email.trim());
     setCooldown(60);
   };
