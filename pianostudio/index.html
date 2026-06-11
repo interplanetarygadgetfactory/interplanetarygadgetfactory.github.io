@@ -145,8 +145,17 @@ function App() {
   const [profile, setProfile] = useState(null);
   const [authReady, setAuthReady] = useState(false);
   const [recovery, setRecovery] = useState(false);
+  const [teacherExists, setTeacherExists] = useState(true);
   const [toast, setToast] = useState(null);
   const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3200); };
+
+  const checkTeacher = useCallback(async () => {
+    try {
+      const { data, error } = await sb.rpc("teacher_exists");
+      if (!error) setTeacherExists(!!data);
+    } catch {}
+  }, []);
+  useEffect(() => { if (CONFIGURED) checkTeacher(); }, [checkTeacher]);
 
   useEffect(() => {
     if (!CONFIGURED) return;
@@ -184,10 +193,20 @@ function App() {
     );
 
   if (!session)
-    return <Shell toast={toast}><AuthScreen flash={flash} /></Shell>;
+    return <Shell toast={toast}><AuthScreen flash={flash} teacherExists={teacherExists} /></Shell>;
 
   if (!profile)
     return <Shell toast={toast}><p style={{ color: C.inkSoft, padding: 24 }}>Loading your profile…</p></Shell>;
+
+  if (!teacherExists && profile.role !== "teacher")
+    return (
+      <Shell toast={toast} who={profile} onSignOut={signOut}>
+        <ClaimTeacher
+          onClaimed={async () => { await checkTeacher(); await loadProfile(); flash("You're the teacher — welcome to your studio!"); }}
+          onStudent={() => setTeacherExists(true)}
+          flash={flash} />
+      </Shell>
+    );
 
   if (profile.status === "removed")
     return (
@@ -270,7 +289,36 @@ function Shell({ children, toast, who, onSignOut }) {
 /* ═════════════════════════════════════════════════════════════
    Auth screens
    ═════════════════════════════════════════════════════════════ */
-function AuthScreen({ flash }) {
+function ClaimTeacher({ onClaimed, onStudent, flash }) {
+  const [busy, setBusy] = useState(false);
+  const claim = async () => {
+    setBusy(true);
+    const { data, error } = await sb.rpc("claim_teacher");
+    setBusy(false);
+    if (error) { flash("Couldn't set up: " + error.message); return; }
+    if (data === false) { flash("A teacher account already exists."); onStudent(); return; }
+    onClaimed();
+  };
+  return (
+    <Card style={{ maxWidth: 520, marginTop: 24 }}>
+      <h2 style={h2Style}>Set up your studio</h2>
+      <p style={pMuted}>
+        This studio doesn't have a teacher yet. If you're the teacher, claim the
+        studio now — your account becomes the teacher account that approves
+        students and manages the schedule. This only works for the very first
+        account; afterwards, everyone who signs up is a student.
+      </p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Btn kind="accent" disabled={busy} onClick={claim}>
+          {busy ? "Setting up…" : "I'm the teacher — set up my studio"}
+        </Btn>
+        <Btn kind="ghost" onClick={onStudent}>I'm a student</Btn>
+      </div>
+    </Card>
+  );
+}
+
+function AuthScreen({ flash, teacherExists }) {
   const [mode, setMode] = useState("login"); // login | signup | forgot
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -316,6 +364,15 @@ function AuthScreen({ flash }) {
   return (
     <div style={{ paddingTop: 8 }}>
       <Staff />
+      {!teacherExists && (
+        <Card style={{ maxWidth: 440, margin: "0 auto 14px", background: C.brassSoft, borderColor: C.brass }}>
+          <p style={{ ...pMuted, margin: 0, fontSize: 13 }}>
+            <strong>First time here?</strong> This studio hasn't been set up yet.
+            The teacher should sign up first — after confirming their email and
+            logging in, they'll be offered the teacher role automatically.
+          </p>
+        </Card>
+      )}
       <Card style={{ maxWidth: 440, margin: "0 auto" }}>
         <h2 style={h2Style}>
           {mode === "login" ? "Log in" : mode === "signup" ? "Create your account" : "Reset password"}
